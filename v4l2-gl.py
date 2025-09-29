@@ -69,6 +69,13 @@ class V4L2GL(Gtk.Window):
         file_btn = Gtk.Button(label="Browse")
         file_btn.connect("clicked", self.browse_file)
         file_hbox.pack_start(file_btn, False, False, 0)
+        self.start_btn = Gtk.Button(label="Start Stream")
+        self.start_btn.connect("clicked", self.start_stream)
+        file_hbox.pack_start(self.start_btn, False, False, 0)
+        self.stop_btn = Gtk.Button(label="Stop Stream")
+        self.stop_btn.connect("clicked", self.stop_stream)
+        self.stop_btn.set_sensitive(False)
+        file_hbox.pack_start(self.stop_btn, False, False, 0)
         vbox.pack_start(file_hbox, False, False, 0)
 
         device_hbox = Gtk.HBox(spacing=6)
@@ -76,17 +83,31 @@ class V4L2GL(Gtk.Window):
         self.device_entry = Gtk.Entry()
         self.device_entry.set_text(self.output_device)
         device_hbox.pack_start(self.device_entry, True, True, 0)
+        device_hbox.pack_start(Gtk.Label(label="Resolution:"), False, False, 0)
+        self.resolution_combo = Gtk.ComboBoxText()
+        self.resolution_combo.append_text("720p (1280×720)")
+        self.resolution_combo.append_text("1080p (1920×1080)")
+        self.resolution_combo.append_text("2K (2560×1440)")
+        self.resolution_combo.append_text("4K (3840×2160)")
+        self.resolution_combo.append_text("5K (5120×2880)")
+        self.resolution_combo.append_text("6K (6144×3456)")
+        self.resolution_combo.append_text("8K (7680×4320)")
+        self.resolution_combo.set_active(3)
+        self.resolution_combo.connect("changed", self.on_resolution_changed)
+        device_hbox.pack_start(self.resolution_combo, False, False, 0)
         vbox.pack_start(device_hbox, False, False, 0)
 
+        cube_size_hbox = Gtk.HBox(spacing=6)
         self.cube_size_label = Gtk.Label(label="Cube Size: 24.0 inches")
         self.cube_size_label.set_halign(Gtk.Align.START)
-        vbox.pack_start(self.cube_size_label, False, False, 0)
+        cube_size_hbox.pack_start(self.cube_size_label, False, False, 0)
         self.cube_size_slider = Gtk.HScale()
         self.cube_size_slider.set_range(12.0, 48.0)
         self.cube_size_slider.set_value(24.0)
         self.cube_size_slider.set_increments(1.0, 6.0)
         self.cube_size_slider.connect("value-changed", self.update_cube_size)
-        vbox.pack_start(self.cube_size_slider, False, False, 0)
+        cube_size_hbox.pack_start(self.cube_size_slider, True, True, 0)
+        vbox.pack_start(cube_size_hbox, False, False, 0)
 
         self.gl_area = Gtk.GLArea()
         self.gl_area.set_size_request(640, 480)
@@ -107,19 +128,6 @@ class V4L2GL(Gtk.Window):
         self.gl_area.connect("scroll-event", self.on_mouse_scroll)
 
         vbox.pack_start(self.gl_area, True, True, 0)
-
-        button_hbox = Gtk.HBox(spacing=6)
-
-        self.start_btn = Gtk.Button(label="Start Stream")
-        self.start_btn.connect("clicked", self.start_stream)
-        button_hbox.pack_start(self.start_btn, True, True, 0)
-
-        self.stop_btn = Gtk.Button(label="Stop Stream")
-        self.stop_btn.connect("clicked", self.stop_stream)
-        self.stop_btn.set_sensitive(False)
-        button_hbox.pack_start(self.stop_btn, True, True, 0)
-
-        vbox.pack_start(button_hbox, False, False, 0)
 
     def browse_file(self, widget):
         dialog = Gtk.FileChooserDialog(
@@ -155,6 +163,24 @@ class V4L2GL(Gtk.Window):
             self.gl_area.queue_render()
 
         dialog.destroy()
+
+    def on_resolution_changed(self, widget):
+        text = widget.get_active_text()
+        if text:
+            resolutions = {
+                "720p (1280×720)": (1280, 720),
+                "1080p (1920×1080)": (1920, 1080),
+                "2K (2560×1440)": (2560, 1440),
+                "4K (3840×2160)": (3840, 2160),
+                "5K (5120×2880)": (5120, 2880),
+                "6K (6144×3456)": (6144, 3456),
+                "8K (7680×4320)": (7680, 4320),
+            }
+            if text in resolutions:
+                self.output_width, self.output_height = resolutions[text]
+                if self.stream_fbo:
+                    self.gl_area.make_current()
+                    self.init_stream_fbo()
 
     def on_mouse_press(self, widget, event):
         self.mouse_last_x = event.x
@@ -225,9 +251,9 @@ class V4L2GL(Gtk.Window):
         with self.params_lock:
             if self.camera:
                 if event.direction == Gdk.ScrollDirection.UP:
-                    self.camera.zoom(-5.0)
+                    self.camera.zoom(-2.0)
                 elif event.direction == Gdk.ScrollDirection.DOWN:
-                    self.camera.zoom(5.0)
+                    self.camera.zoom(2.0)
 
         self.gl_area.queue_render()
         return True
@@ -514,7 +540,7 @@ class V4L2GL(Gtk.Window):
             "-f", "rawvideo",
             "-pix_fmt", "rgb24",
             "-s", f"{self.output_width}x{self.output_height}",
-            "-r", "10",
+            "-r", "24",
             "-i", "-",
             "-fflags", "nobuffer",
             "-flags", "low_delay",
@@ -534,7 +560,7 @@ class V4L2GL(Gtk.Window):
         )
 
         self.streaming = True
-        GLib.timeout_add(100, self.stream_loop_idle)
+        GLib.timeout_add(42, self.stream_loop_idle)
 
         self.start_btn.set_sensitive(False)
         self.stop_btn.set_sensitive(True)
