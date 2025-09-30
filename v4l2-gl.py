@@ -3,6 +3,7 @@
 import sys
 import subprocess
 import threading
+import queue
 import time
 import os
 import gi
@@ -31,10 +32,14 @@ class V4L2GL(Gtk.Window):
         self.output_device = "/dev/video11"
         self.ffmpeg_process = None
         self.streaming = False
+        self.frame_queue = None
+        self.frame_ready_event = None
+        self.stream_thread = None
         self.params_lock = threading.Lock()
 
         self.output_width = 3840
         self.output_height = 2160
+        self.output_fps = 24
 
         self.cube = None
         self.card = None
@@ -95,6 +100,15 @@ class V4L2GL(Gtk.Window):
         self.resolution_combo.set_active(3)
         self.resolution_combo.connect("changed", self.on_resolution_changed)
         device_hbox.pack_start(self.resolution_combo, False, False, 0)
+        device_hbox.pack_start(Gtk.Label(label="FPS:"), False, False, 0)
+        self.fps_combo = Gtk.ComboBoxText()
+        self.fps_combo.append_text("15")
+        self.fps_combo.append_text("24")
+        self.fps_combo.append_text("30")
+        self.fps_combo.append_text("60")
+        self.fps_combo.set_active(1)
+        self.fps_combo.connect("changed", self.on_fps_changed)
+        device_hbox.pack_start(self.fps_combo, False, False, 0)
         vbox.pack_start(device_hbox, False, False, 0)
 
         cube_size_hbox = Gtk.HBox(spacing=6)
@@ -107,6 +121,10 @@ class V4L2GL(Gtk.Window):
         self.cube_size_slider.set_increments(1.0, 6.0)
         self.cube_size_slider.connect("value-changed", self.update_cube_size)
         cube_size_hbox.pack_start(self.cube_size_slider, True, True, 0)
+        self.background_checkbox = Gtk.CheckButton(label="Use Background Image")
+        self.background_checkbox.set_active(True)
+        self.background_checkbox.connect("toggled", self.on_background_toggled)
+        cube_size_hbox.pack_start(self.background_checkbox, False, False, 0)
         vbox.pack_start(cube_size_hbox, False, False, 0)
 
         self.gl_area = Gtk.GLArea()
@@ -182,6 +200,14 @@ class V4L2GL(Gtk.Window):
                     self.gl_area.make_current()
                     self.init_stream_fbo()
 
+    def on_fps_changed(self, widget):
+        text = widget.get_active_text()
+        if text:
+            try:
+                self.output_fps = int(text)
+            except ValueError:
+                pass
+
     def on_mouse_press(self, widget, event):
         self.mouse_last_x = event.x
         self.mouse_last_y = event.y
@@ -218,6 +244,16 @@ class V4L2GL(Gtk.Window):
                 z_pos = self.cube.size / 2.0 + self.card.thickness / 2.0
                 self.card.set_position(self.card.position[0], self.card.position[1], z_pos)
         self.cube_size_label.set_text("Cube Size: %.1f inches" % widget.get_value())
+        self.gl_area.queue_render()
+
+    def on_background_toggled(self, widget):
+        with self.params_lock:
+            if self.cube:
+                self.gl_area.make_current()
+                if widget.get_active():
+                    self.cube.set_image("wood-bg.jpg", self.load_texture)
+                else:
+                    self.cube.set_image(None, lambda _: self.create_black_texture())
         self.gl_area.queue_render()
 
     def on_mouse_motion(self, widget, event):
@@ -275,6 +311,19 @@ class V4L2GL(Gtk.Window):
             return texture_id
         except:
             return None
+
+    def create_black_texture(self):
+        black_data = np.zeros((64, 64, 3), dtype=np.uint8)
+
+        texture_id = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, texture_id)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 64, 64, 0, GL_RGB, GL_UNSIGNED_BYTE, black_data)
+
+        return texture_id
 
     def compile_shader(self, source, shader_type):
         shader = glCreateShader(shader_type)
@@ -509,26 +558,51 @@ class V4L2GL(Gtk.Window):
 
         return img.tobytes()
 
-    def capture_frame_idle(self):
-        if not self.streaming or not self.ffmpeg_process:
+    def stream_worker(self):
+        frame_time = 1.0 / float(self.output_fps)
+        last_frame_time = time.time()
+
+        while self.streaming:
+            try:
+                current_time = time.time()
+                elapsed = current_time - last_frame_time
+
+                if elapsed >= frame_time:
+                    last_frame_time = current_time
+
+                    self.frame_ready_event.clear()
+                    GLib.idle_add(self.capture_frame_for_stream)
+
+                    if self.frame_ready_event.wait(timeout=1.0):
+                        frame_data = self.frame_queue.get(timeout=0.1)
+                        if frame_data and self.ffmpeg_process:
+                            self.ffmpeg_process.stdin.write(frame_data)
+                            self.ffmpeg_process.stdin.flush()
+                else:
+                    sleep_time = frame_time - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+
+            except Exception as e:
+                print(f"Error in stream worker: {e}")
+                break
+
+    def capture_frame_for_stream(self):
+        if not self.streaming:
             return False
 
         try:
             self.gl_area.make_current()
             frame_data = self.render_to_buffer()
-
             if frame_data:
-                self.ffmpeg_process.stdin.write(frame_data)
-                self.ffmpeg_process.stdin.flush()
+                self.frame_queue.put(frame_data)
+            self.frame_ready_event.set()
         except Exception as e:
             print(f"Error capturing frame: {e}")
-            self.stop_stream()
-            return False
+            self.frame_ready_event.set()
 
-        return True
+        return False
 
-    def stream_loop_idle(self):
-        return self.capture_frame_idle()
 
     def start_stream(self, widget):
         self.image_path = self.file_entry.get_text()
@@ -540,7 +614,7 @@ class V4L2GL(Gtk.Window):
             "-f", "rawvideo",
             "-pix_fmt", "rgb24",
             "-s", f"{self.output_width}x{self.output_height}",
-            "-r", "24",
+            "-r", str(self.output_fps),
             "-i", "-",
             "-fflags", "nobuffer",
             "-flags", "low_delay",
@@ -559,14 +633,34 @@ class V4L2GL(Gtk.Window):
             stderr=None
         )
 
+        self.frame_queue = queue.Queue(maxsize=2)
+        self.frame_ready_event = threading.Event()
         self.streaming = True
-        GLib.timeout_add(42, self.stream_loop_idle)
+
+        self.stream_thread = threading.Thread(target=self.stream_worker, daemon=True)
+        self.stream_thread.start()
 
         self.start_btn.set_sensitive(False)
         self.stop_btn.set_sensitive(True)
 
     def stop_stream(self, widget=None):
         self.streaming = False
+
+        if self.stream_thread and self.stream_thread.is_alive():
+            self.stream_thread.join(timeout=2)
+            self.stream_thread = None
+
+        if self.frame_queue:
+            while not self.frame_queue.empty():
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self.frame_queue = None
+
+        if self.frame_ready_event:
+            self.frame_ready_event.set()
+            self.frame_ready_event = None
 
         if self.ffmpeg_process:
             try:
