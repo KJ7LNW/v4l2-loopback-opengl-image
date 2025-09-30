@@ -22,14 +22,15 @@ from camera import Camera
 
 
 class V4L2GL(Gtk.Window):
-    def __init__(self):
+    def __init__(self, device=None):
         Gtk.Window.__init__(self, title="V4L2 OpenGL Controller")
         self.set_default_size(800, 600)
         self.set_border_width(10)
 
         self.image_path = "sample.jpg"
         self.last_directory = os.path.dirname(os.path.abspath(self.image_path)) or os.getcwd()
-        self.output_device = "/dev/video11"
+        self.output_device = device
+        self.requested_device = device
         self.ffmpeg_process = None
         self.streaming = False
         self.frame_queue = None
@@ -90,9 +91,10 @@ class V4L2GL(Gtk.Window):
 
         device_hbox = Gtk.HBox(spacing=6)
         device_hbox.pack_start(Gtk.Label(label="Device:"), False, False, 0)
-        self.device_entry = Gtk.Entry()
-        self.device_entry.set_text(self.output_device)
-        device_hbox.pack_start(self.device_entry, True, True, 0)
+        self.device_combo = Gtk.ComboBoxText()
+        self.populate_video_devices()
+        self.device_combo.connect("changed", self.on_device_changed)
+        device_hbox.pack_start(self.device_combo, False, False, 0)
         device_hbox.pack_start(Gtk.Label(label="Resolution:"), False, False, 0)
         self.resolution_combo = Gtk.ComboBoxText()
         self.resolution_combo.append_text("720p (1280×720)")
@@ -158,6 +160,42 @@ class V4L2GL(Gtk.Window):
         self.gl_area.connect("scroll-event", self.on_mouse_scroll)
 
         vbox.pack_start(self.gl_area, True, True, 0)
+
+    def populate_video_devices(self):
+        import glob
+        devices = []
+        for dev_path in sorted(glob.glob("/dev/video*")):
+            try:
+                dev_num = dev_path.replace("/dev/video", "")
+                if not dev_num.isdigit():
+                    continue
+
+                name_path = f"/sys/class/video4linux/video{dev_num}/name"
+                if os.path.exists(name_path):
+                    with open(name_path, 'r') as f:
+                        dev_name = f.read().strip()
+                    label = f"{dev_path} ({dev_name})"
+                else:
+                    label = dev_path
+
+                devices.append((dev_path, label))
+                self.device_combo.append(dev_path, label)
+
+                if self.requested_device and dev_path == self.requested_device:
+                    self.device_combo.set_active_id(dev_path)
+            except:
+                continue
+
+        if self.device_combo.get_active() == -1 and devices:
+            self.device_combo.set_active(0)
+            first_dev = self.device_combo.get_active_id()
+            if first_dev:
+                self.output_device = first_dev
+
+    def on_device_changed(self, widget):
+        device_id = widget.get_active_id()
+        if device_id:
+            self.output_device = device_id
 
     def browse_file(self, widget):
         dialog = Gtk.FileChooserDialog(
@@ -256,8 +294,9 @@ class V4L2GL(Gtk.Window):
                 self.gl_area.make_current()
                 self.cube.size = widget.get_value()
                 self.cube.create_vao()
-                z_pos = self.cube.size / 2.0 + self.card.thickness / 2.0
-                self.card.set_position(self.card.position[0], self.card.position[1], z_pos)
+                if self.card:
+                    z_pos = self.cube.size / 2.0 + self.card.thickness / 2.0
+                    self.card.set_position(self.card.position[0], self.card.position[1], z_pos)
         self.cube_size_label.set_text("Cube Size: %.1f inches" % widget.get_value())
         self.gl_area.queue_render()
 
@@ -706,7 +745,9 @@ class V4L2GL(Gtk.Window):
 
     def start_stream(self, widget):
         self.image_path = self.file_entry.get_text()
-        self.output_device = self.device_entry.get_text()
+        device_id = self.device_combo.get_active_id()
+        if device_id:
+            self.output_device = device_id
 
         cmd = [
             "ffmpeg",
@@ -780,6 +821,8 @@ class V4L2GL(Gtk.Window):
 
 
 if __name__ == "__main__":
-    window = V4L2GL()
+    import sys
+    device = sys.argv[1] if len(sys.argv) > 1 else None
+    window = V4L2GL(device)
     window.show_all()
     Gtk.main()
