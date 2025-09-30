@@ -40,6 +40,7 @@ class V4L2GL(Gtk.Window):
         self.output_width = 3840
         self.output_height = 2160
         self.output_fps = 24
+        self.flip_horizontal = True
 
         self.cube = None
         self.card = None
@@ -57,6 +58,10 @@ class V4L2GL(Gtk.Window):
         self.stream_fbo = None
         self.stream_texture = None
         self.stream_rbo = None
+        self.stream_msaa_fbo = None
+        self.stream_msaa_texture = None
+        self.stream_msaa_rbo = None
+        self.msaa_samples = 8
         self.recent_manager = Gtk.RecentManager.get_default()
 
         self.init_ui()
@@ -125,6 +130,13 @@ class V4L2GL(Gtk.Window):
         self.background_checkbox.set_active(True)
         self.background_checkbox.connect("toggled", self.on_background_toggled)
         cube_size_hbox.pack_start(self.background_checkbox, False, False, 0)
+        self.flip_checkbox = Gtk.CheckButton(label="Flip Horizontal")
+        self.flip_checkbox.set_active(True)
+        self.flip_checkbox.connect("toggled", self.on_flip_toggled)
+        cube_size_hbox.pack_start(self.flip_checkbox, False, False, 0)
+        reset_btn = Gtk.Button(label="Reset View")
+        reset_btn.connect("clicked", self.reset_view)
+        cube_size_hbox.pack_start(reset_btn, False, False, 0)
         vbox.pack_start(cube_size_hbox, False, False, 0)
 
         self.gl_area = Gtk.GLArea()
@@ -176,6 +188,7 @@ class V4L2GL(Gtk.Window):
 
             with self.params_lock:
                 if self.card:
+                    self.gl_area.make_current()
                     self.card.set_image(self.image_path, self.load_texture)
 
             self.gl_area.queue_render()
@@ -195,7 +208,9 @@ class V4L2GL(Gtk.Window):
                 "8K (7680×4320)": (7680, 4320),
             }
             if text in resolutions:
-                self.output_width, self.output_height = resolutions[text]
+                width, height = resolutions[text]
+                self.output_width = width & ~1
+                self.output_height = height & ~1
                 if self.stream_fbo:
                     self.gl_area.make_current()
                     self.init_stream_fbo()
@@ -256,6 +271,28 @@ class V4L2GL(Gtk.Window):
                     self.cube.set_image(None, lambda _: self.create_black_texture())
         self.gl_area.queue_render()
 
+    def on_flip_toggled(self, widget):
+        self.flip_horizontal = widget.get_active()
+
+    def reset_view(self, widget):
+        with self.params_lock:
+            if self.camera:
+                self.camera.distance = 18.0
+                self.camera.rotation_x = 0.0
+                self.camera.rotation_y = 0.0
+                self.camera.pan_x = 0.0
+                self.camera.pan_y = 0.0
+
+            if self.light:
+                self.light.rotation_x = 0.0
+                self.light.rotation_y = 0.0
+
+            if self.card and self.cube:
+                z_pos = self.cube.size / 2.0 + self.card.thickness / 2.0
+                self.card.set_position(0.0, 0.0, z_pos)
+
+        self.gl_area.queue_render()
+
     def on_mouse_motion(self, widget, event):
         dx = event.x - self.mouse_last_x
         dy = event.y - self.mouse_last_y
@@ -287,9 +324,9 @@ class V4L2GL(Gtk.Window):
         with self.params_lock:
             if self.camera:
                 if event.direction == Gdk.ScrollDirection.UP:
-                    self.camera.zoom(-2.0)
+                    self.camera.zoom(-0.5)
                 elif event.direction == Gdk.ScrollDirection.DOWN:
-                    self.camera.zoom(2.0)
+                    self.camera.zoom(0.5)
 
         self.gl_area.queue_render()
         return True
@@ -302,11 +339,12 @@ class V4L2GL(Gtk.Window):
 
             texture_id = glGenTextures(1)
             glBindTexture(GL_TEXTURE_2D, texture_id)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, img.width, img.height, 0, GL_RGB, GL_UNSIGNED_BYTE, img_data)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, img.width, img.height, 0, GL_RGB, GL_UNSIGNED_BYTE, img_data)
+            glGenerateMipmap(GL_TEXTURE_2D)
 
             return texture_id
         except:
@@ -317,11 +355,12 @@ class V4L2GL(Gtk.Window):
 
         texture_id = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, texture_id)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 64, 64, 0, GL_RGB, GL_UNSIGNED_BYTE, black_data)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 64, 64, 0, GL_RGB, GL_UNSIGNED_BYTE, black_data)
+        glGenerateMipmap(GL_TEXTURE_2D)
 
         return texture_id
 
@@ -371,6 +410,25 @@ class V4L2GL(Gtk.Window):
         uniform vec3 lightPos;
         uniform vec3 viewPos;
 
+        float bayerDither8x8(vec2 coord) {
+            int x = int(mod(coord.x, 8.0));
+            int y = int(mod(coord.y, 8.0));
+            int index = x + y * 8;
+
+            float bayer[64] = float[](
+                 0.0/64.0, 48.0/64.0, 12.0/64.0, 60.0/64.0,  3.0/64.0, 51.0/64.0, 15.0/64.0, 63.0/64.0,
+                32.0/64.0, 16.0/64.0, 44.0/64.0, 28.0/64.0, 35.0/64.0, 19.0/64.0, 47.0/64.0, 31.0/64.0,
+                 8.0/64.0, 56.0/64.0,  4.0/64.0, 52.0/64.0, 11.0/64.0, 59.0/64.0,  7.0/64.0, 55.0/64.0,
+                40.0/64.0, 24.0/64.0, 36.0/64.0, 20.0/64.0, 43.0/64.0, 27.0/64.0, 39.0/64.0, 23.0/64.0,
+                 2.0/64.0, 50.0/64.0, 14.0/64.0, 62.0/64.0,  1.0/64.0, 49.0/64.0, 13.0/64.0, 61.0/64.0,
+                34.0/64.0, 18.0/64.0, 46.0/64.0, 30.0/64.0, 33.0/64.0, 17.0/64.0, 45.0/64.0, 29.0/64.0,
+                10.0/64.0, 58.0/64.0,  6.0/64.0, 54.0/64.0,  9.0/64.0, 57.0/64.0,  5.0/64.0, 53.0/64.0,
+                42.0/64.0, 26.0/64.0, 38.0/64.0, 22.0/64.0, 41.0/64.0, 25.0/64.0, 37.0/64.0, 21.0/64.0
+            );
+
+            return bayer[index];
+        }
+
         void main()
         {
             vec3 norm = normalize(fragNormal);
@@ -386,7 +444,12 @@ class V4L2GL(Gtk.Window):
             float lighting = ambient + diff + spec;
 
             vec4 texColor = texture(textureSampler, fragTexCoord);
-            FragColor = vec4(texColor.rgb * lighting, texColor.a);
+            vec3 litColor = texColor.rgb * lighting;
+
+            float dither = (bayerDither8x8(gl_FragCoord.xy) - 0.5) / 255.0;
+            litColor += vec3(dither);
+
+            FragColor = vec4(litColor, texColor.a);
         }
         """
 
@@ -458,6 +521,14 @@ class V4L2GL(Gtk.Window):
 
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_MULTISAMPLE)
+        glEnable(GL_DITHER)
+
+        try:
+            glEnable(GL_SAMPLE_SHADING)
+            glMinSampleShading(1.0)
+        except:
+            pass
+
         glClearColor(0.1, 0.1, 0.1, 1.0)
 
         self.shader_program = self.create_shader_program()
@@ -500,6 +571,12 @@ class V4L2GL(Gtk.Window):
         width = self.output_width
         height = self.output_height
 
+        if self.stream_msaa_fbo:
+            glDeleteFramebuffers(1, [self.stream_msaa_fbo])
+        if self.stream_msaa_texture:
+            glDeleteTextures([self.stream_msaa_texture])
+        if self.stream_msaa_rbo:
+            glDeleteRenderbuffers(1, [self.stream_msaa_rbo])
         if self.stream_fbo:
             glDeleteFramebuffers(1, [self.stream_fbo])
         if self.stream_texture:
@@ -507,12 +584,28 @@ class V4L2GL(Gtk.Window):
         if self.stream_rbo:
             glDeleteRenderbuffers(1, [self.stream_rbo])
 
+        self.stream_msaa_fbo = glGenFramebuffers(1)
+        glBindFramebuffer(GL_FRAMEBUFFER, self.stream_msaa_fbo)
+
+        self.stream_msaa_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, self.stream_msaa_texture)
+        glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, self.msaa_samples, GL_RGB8, width, height, GL_TRUE)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, self.stream_msaa_texture, 0)
+
+        self.stream_msaa_rbo = glGenRenderbuffers(1)
+        glBindRenderbuffer(GL_RENDERBUFFER, self.stream_msaa_rbo)
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, self.msaa_samples, GL_DEPTH_COMPONENT, width, height)
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, self.stream_msaa_rbo)
+
+        if glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE:
+            print("ERROR: MSAA Framebuffer is not complete!")
+
         self.stream_fbo = glGenFramebuffers(1)
         glBindFramebuffer(GL_FRAMEBUFFER, self.stream_fbo)
 
         self.stream_texture = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, self.stream_texture)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, None)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, None)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.stream_texture, 0)
@@ -523,7 +616,7 @@ class V4L2GL(Gtk.Window):
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, self.stream_rbo)
 
         if glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE:
-            print("ERROR: Framebuffer is not complete!")
+            print("ERROR: Resolve Framebuffer is not complete!")
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
@@ -531,12 +624,12 @@ class V4L2GL(Gtk.Window):
         width = self.output_width
         height = self.output_height
 
-        if not self.stream_fbo:
+        if not self.stream_msaa_fbo:
             self.init_stream_fbo()
 
         old_viewport = glGetIntegerv(GL_VIEWPORT)
 
-        glBindFramebuffer(GL_FRAMEBUFFER, self.stream_fbo)
+        glBindFramebuffer(GL_FRAMEBUFFER, self.stream_msaa_fbo)
         glViewport(0, 0, width, height)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
@@ -544,6 +637,11 @@ class V4L2GL(Gtk.Window):
         projection = self.perspective_matrix(45.0, aspect, 1.0, 500.0)
         self.render_scene(projection)
 
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, self.stream_msaa_fbo)
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self.stream_fbo)
+        glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST)
+
+        glBindFramebuffer(GL_FRAMEBUFFER, self.stream_fbo)
         glFlush()
         glFinish()
 
@@ -551,6 +649,8 @@ class V4L2GL(Gtk.Window):
         pixels = glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE)
         img = np.frombuffer(pixels, dtype=np.uint8).reshape((height, width, 3))
         img = np.flipud(img)
+        if self.flip_horizontal:
+            img = np.fliplr(img)
         glPixelStorei(GL_PACK_ALIGNMENT, 4)
 
         glViewport(old_viewport[0], old_viewport[1], old_viewport[2], old_viewport[3])

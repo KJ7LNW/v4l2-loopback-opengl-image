@@ -3,7 +3,7 @@ import numpy as np
 
 class Camera:
     def __init__(self):
-        self.distance = 100.0
+        self.distance = 18.0
         self.rotation_x = 0.0
         self.rotation_y = 0.0
         self.pan_x = 0.0
