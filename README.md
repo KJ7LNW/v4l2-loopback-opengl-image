@@ -6,24 +6,26 @@ OpenGL-based virtual camera application that streams 3D-rendered scenes to v4l2l
 
 ## Description
 
-v4l2-loopback-opengl-image creates a virtual camera by rendering a 3D scene with OpenGL and streaming it through FFmpeg to a v4l2loopback device.
+v4l2-loopback-opengl-image creates a virtual camera by rendering a 3D scene with OpenGL and streaming it through FFmpeg to a [v4l2loopback](https://github.com/v4l2loopback/v4l2loopback) device. While this application was tested with v4l2loopback, it should work with any V4L2 device that supports output mode (such as USB HDMI capture devices).
 
-### Use Case
+**Note:** Users are responsible for installing v4l2loopback if they wish to use it as a virtual camera device. See the Installation section below.
 
-This tool is designed for video conferencing and streaming applications where you need to display a static image (such as a document, diagram, barcode, or presentation slide) through a virtual camera device. The 3D rendering environment allows you to:
+### Use Case: Web Browser Camera/Image Upload Workaround
 
+Some websites require camera access for image capture but don't provide a file upload option. This tool solves that problem by presenting a static image through a virtual camera that browsers like Firefox and Chrome can access. Instead of being forced to use a physical camera or being unable to submit an image at all, you can load any image file and present it as a camera feed.
+
+The 3D rendering environment provides additional capabilities:
 - Position and orient the image naturally in 3D space
-- Adjust perspective and viewing angle interactively during calls
+- Adjust perspective and viewing angle interactively
 - Control lighting to ensure optimal visibility
-- Pan and zoom to focus on specific areas
+- Pan and zoom to focus on specific areas of the image
 - Present professional-looking content with anti-aliased rendering
 
-Common applications include:
-- Displaying technical diagrams or schematics during remote support sessions
-- Showing product images or barcodes for verification
-- Presenting documents or certificates during video calls
-- Creating dynamic visual presentations with adjustable perspective
+Additional applications:
+- Showing product images or barcodes for verification on camera-only websites
+- Displaying technical diagrams or documents through browser-based camera interfaces
 - Testing camera input applications with controlled 3D-rendered content
+- Creating dynamic visual presentations with adjustable perspective
 
 ### Features
 
@@ -43,17 +45,34 @@ The application provides:
 - GTK 3
 - OpenGL 3.3+
 - FFmpeg
-- v4l2loopback kernel module
+- v4l2loopback kernel module (if using virtual camera)
 - Python packages: PyOpenGL, numpy, Pillow, PyGObject
 
 ## Installation
 
+### System Dependencies
+
 ```bash
 # Install system dependencies (Debian/Ubuntu)
-sudo apt-get install python3-gi python3-opengl ffmpeg v4l2loopback-dkms
+sudo apt-get install python3-gi python3-opengl ffmpeg
 
 # Install Python packages
 pip3 install numpy Pillow PyOpenGL
+```
+
+### v4l2loopback Installation
+
+If you want to use this application as a virtual camera (recommended), you must install v4l2loopback:
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install v4l2loopback-dkms
+
+# Or build from source
+git clone https://github.com/v4l2loopback/v4l2loopback.git
+cd v4l2loopback
+make && sudo make install
+sudo depmod -a
 ```
 
 ## Usage
